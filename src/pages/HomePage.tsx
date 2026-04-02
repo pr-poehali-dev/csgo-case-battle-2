@@ -42,13 +42,13 @@ export default function HomePage({ onNavigate, onOpenCase, onDeposit }: HomePage
           <div className="hero__orb hero__orb--3" />
         </div>
         <div className="hero__content">
-          <div className="hero__badge">🔥 Сезон 2024 · CS2</div>
+          <div className="hero__badge rounded-full bg-slate-900">🔥 Сезон 2024 · CS2</div>
           <h1 className="hero__title">
             ОТКРЫВАЙ КЕЙСЫ<br />
             <span className="hero__accent">ВЫИГРЫВАЙ СКИНЫ</span>
           </h1>
           <p className="hero__sub">50+ кейсов с реальными скинами CS2 по ценам Steam. Апгрейды, контракты, вывод на Steam.</p>
-          <div className="hero__actions">
+          <div className="hero__actions mx-[55px] px-[55px]">
             <button className="btn-hero-primary" onClick={() => onNavigate('cases')}>
               <Icon name="Package" size={20} />
               Открыть кейс
@@ -93,7 +93,7 @@ export default function HomePage({ onNavigate, onOpenCase, onDeposit }: HomePage
       </section>
 
       {/* Featured cases */}
-      <section className="section">
+      <section className="section rounded-sm mx-[5px] my-[55px]">
         <div className="section__header">
           <h2 className="section__title">🔥 Популярные кейсы</h2>
           <button className="section__more" onClick={() => onNavigate('cases')}>

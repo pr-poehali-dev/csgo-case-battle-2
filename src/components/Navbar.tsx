@@ -22,7 +22,7 @@ export default function Navbar({ currentPage, onNavigate, balance, onDeposit }: 
 
   return (
     <nav className="navbar">
-      <div className="navbar-inner">
+      <div className="navbar-inner mx-0 px-0 rounded-full">
         <button className="logo" onClick={() => onNavigate('home')}>
           <span className="logo-icon">⚡</span>
           <span className="logo-text">SKINDROP<span className="logo-accent">.GG</span></span>
@@ -42,7 +42,7 @@ export default function Navbar({ currentPage, onNavigate, balance, onDeposit }: 
         </div>
 
         <div className="nav-right">
-          <button className="balance-btn" onClick={onDeposit}>
+          <button className="balance-btn font-semibold" onClick={onDeposit}>
             <Icon name="Wallet" size={16} />
             <span>{balance.toLocaleString('ru-RU')} ₽</span>
             <span className="deposit-plus">+</span>
