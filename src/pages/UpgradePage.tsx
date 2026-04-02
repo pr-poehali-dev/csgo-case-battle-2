@@ -7,364 +7,425 @@ interface UpgradePageProps {
   onUpgrade: (from: Skin, to: Skin, won: boolean) => void;
 }
 
-function ReelStrip({ items, running, won, onStop }: {
-  items: Skin[];
-  running: boolean;
-  won: boolean | null;
-  onStop: () => void;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
+const ARROW_COLORS = [
+  { id: 'gold',   label: 'Золото',  hex: '#f0a500' },
+  { id: 'neon',   label: 'Неон',    hex: '#00d4ff' },
+  { id: 'purple', label: 'Фиолет', hex: '#a855f7' },
+  { id: 'red',    label: 'Красный', hex: '#ef4444' },
+  { id: 'green',  label: 'Зелёный', hex: '#22c55e' },
+  { id: 'pink',   label: 'Розовый', hex: '#ec4899' },
+  { id: 'white',  label: 'Белый',   hex: '#f1f5f9' },
+];
 
-  useEffect(() => {
-    if (!running || !ref.current) return;
-    const el = ref.current;
-    const itemW = 112;
-    const winnerIdx = 28;
-    const offset = winnerIdx * itemW - el.parentElement!.clientWidth / 2 + itemW / 2;
-    el.style.transition = 'none';
-    el.style.transform = 'translateX(0px)';
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        el.style.transition = 'transform 3.2s cubic-bezier(0.08, 0.82, 0.17, 1)';
-        el.style.transform = `translateX(-${offset}px)`;
-      });
-    });
-    const t = setTimeout(onStop, 3300);
-    return () => clearTimeout(t);
-  }, [running]);
+const SPIN_MODES = [
+  { id: 'normal', label: 'Обычная', icon: '🎯', desc: 'Плавная прокрутка', duration: 4000 },
+  { id: 'gamble', label: 'Азартная', icon: '🎰', desc: 'Резкое замедление', duration: 3000 },
+];
 
-  return (
-    <div className="upg-reel" ref={ref}>
-      {items.map((skin, i) => (
-        <div
-          key={i}
-          className={`upg-reel-item ${i === 28 && won !== null ? (won ? 'winner-item' : 'loser-item') : ''}`}
-          style={{ borderColor: RARITY_COLORS[skin.rarity] }}
-        >
-          <div className="upg-reel-item__glow" style={{ background: RARITY_COLORS[skin.rarity] }} />
-          <span className="upg-reel-item__emoji">{getWeaponEmoji(skin.weapon)}</span>
-          <span className="upg-reel-item__name">{skin.finish}</span>
-          <span className="upg-reel-item__price">{skin.price.toLocaleString('ru-RU')} ₽</span>
-        </div>
-      ))}
-    </div>
-  );
+function polarToXY(cx: number, cy: number, r: number, deg: number) {
+  const rad = ((deg - 90) * Math.PI) / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
 }
 
-function buildReel(items: Skin[], winner: Skin): Skin[] {
-  const pool = items.length ? items : ALL_SKINS.slice(0, 10);
-  const reel: Skin[] = [];
-  for (let i = 0; i < 50; i++) {
-    reel.push(pool[Math.floor(Math.random() * pool.length)]);
+function arcPath(cx: number, cy: number, r: number, startDeg: number, endDeg: number) {
+  if (endDeg - startDeg >= 360) {
+    return `M ${cx - r} ${cy} A ${r} ${r} 0 1 1 ${cx + r} ${cy} A ${r} ${r} 0 1 1 ${cx - r} ${cy} Z`;
   }
-  reel[28] = winner;
-  return reel;
+  const s = polarToXY(cx, cy, r, startDeg);
+  const e = polarToXY(cx, cy, r, endDeg);
+  const large = endDeg - startDeg > 180 ? 1 : 0;
+  return `M ${cx} ${cy} L ${s.x} ${s.y} A ${r} ${r} 0 ${large} 1 ${e.x} ${e.y} Z`;
 }
 
 export default function UpgradePage({ inventory, onUpgrade }: UpgradePageProps) {
   const [fromSkin, setFromSkin] = useState<Skin | null>(null);
-  const [toSkin, setToSkin] = useState<Skin | null>(null);
+  const [toSkin,   setToSkin]   = useState<Skin | null>(null);
   const [multiplier, setMultiplier] = useState(2);
-  const [phase, setPhase] = useState<'idle' | 'spinning' | 'result'>('idle');
+  const [arrowColor, setArrowColor] = useState('#f0a500');
+  const [spinMode, setSpinMode] = useState<'normal' | 'gamble'>('normal');
+  const [phase,  setPhase]  = useState<'idle' | 'spinning' | 'result'>('idle');
   const [result, setResult] = useState<'win' | 'lose' | null>(null);
-  const [fromReel, setFromReel] = useState<Skin[]>([]);
-  const [toReel, setToReel] = useState<Skin[]>([]);
-  const [stopped, setStopped] = useState(0);
+  const [angle,  setAngle]  = useState(0);
+  const animRef    = useRef<number | null>(null);
+  const startRef   = useRef(0);
+  const fromAngle  = useRef(0);
+  const targetAngle = useRef(0);
+  const durRef     = useRef(4000);
 
   const targetPrice = fromSkin ? Math.round(fromSkin.price * multiplier) : 0;
 
   const possibleTargets = ALL_SKINS.filter(s => {
     if (!fromSkin) return false;
-    const minP = targetPrice * 0.7;
-    const maxP = targetPrice * 1.5;
-    return s.price >= minP && s.price <= maxP && s.id !== fromSkin.id;
+    return s.price >= targetPrice * 0.7 && s.price <= targetPrice * 1.5 && s.id !== fromSkin.id;
   }).slice(0, 12);
 
   const winChance = fromSkin && toSkin
     ? Math.min(Math.round((fromSkin.price / toSkin.price) * 100), 95)
     : 0;
 
+  const winSectorDeg = (winChance / 100) * 360;
+
+  function easeNormal(t: number) { return 1 - Math.pow(1 - t, 4); }
+  function easeGamble(t: number) {
+    if (t < 0.6) return t / 0.6 * 0.85;
+    const s = (t - 0.6) / 0.4;
+    return 0.85 + Math.sin(s * Math.PI * 1.5) * 0.05 * (1 - s) + s * 0.15;
+  }
+
   function runUpgrade() {
     if (!fromSkin || !toSkin || phase !== 'idle') return;
     const won = Math.random() * 100 < winChance;
     setResult(null);
-    setStopped(0);
 
-    const fReel = buildReel(inventory, fromSkin);
-    const tReel = buildReel(possibleTargets.length ? possibleTargets : ALL_SKINS.slice(0, 10), toSkin);
-    setFromReel(fReel);
-    setToReel(tReel);
+    const spins = spinMode === 'gamble' ? 8 : 5;
+    const base  = spins * 360;
+    let land: number;
+    if (won) {
+      land = winSectorDeg * 0.1 + Math.random() * winSectorDeg * 0.8;
+    } else {
+      const loseSize = 360 - winSectorDeg;
+      land = winSectorDeg + loseSize * 0.1 + Math.random() * loseSize * 0.8;
+    }
+
+    fromAngle.current  = angle % 360;
+    targetAngle.current = base + land;
+    startRef.current    = performance.now();
+    durRef.current      = SPIN_MODES.find(m => m.id === spinMode)!.duration;
+
     setPhase('spinning');
 
-    setTimeout(() => {
-      setResult(won ? 'win' : 'lose');
-      setPhase('result');
-      onUpgrade(fromSkin, toSkin, won);
-      if (!won) {
-        setTimeout(() => {
-          setFromSkin(null);
-          setToSkin(null);
-          setPhase('idle');
-          setResult(null);
-        }, 2400);
+    const ease = spinMode === 'gamble' ? easeGamble : easeNormal;
+
+    function tick(now: number) {
+      const t = Math.min((now - startRef.current) / durRef.current, 1);
+      const cur = fromAngle.current + targetAngle.current * ease(t);
+      setAngle(cur);
+      if (t < 1) {
+        animRef.current = requestAnimationFrame(tick);
+      } else {
+        setAngle(fromAngle.current + targetAngle.current);
+        setPhase('result');
+        setResult(won ? 'win' : 'lose');
+        onUpgrade(fromSkin!, toSkin!, won);
+        if (!won) setTimeout(() => {
+          setFromSkin(null); setToSkin(null);
+          setPhase('idle'); setResult(null);
+        }, 2200);
       }
-    }, 3500);
+    }
+
+    if (animRef.current) cancelAnimationFrame(animRef.current);
+    animRef.current = requestAnimationFrame(tick);
   }
+
+  useEffect(() => () => { if (animRef.current) cancelAnimationFrame(animRef.current); }, []);
 
   function reset() {
-    setFromSkin(null);
-    setToSkin(null);
-    setPhase('idle');
-    setResult(null);
-    setFromReel([]);
-    setToReel([]);
+    setFromSkin(null); setToSkin(null);
+    setPhase('idle'); setResult(null); setAngle(0);
   }
 
-  const showReel = phase === 'spinning' || phase === 'result';
+  const displayAngle = angle % 360;
 
   return (
-    <div className="page upgrade-page-v2">
+    <div className="upg2-page">
       {/* Header */}
-      <div className="upg-header">
+      <div className="upg2-header">
         <div>
           <h1 className="page-title">⚡ Апгрейд</h1>
-          <p className="page-sub">Поставь скин — получи лучше</p>
+          <p className="page-sub">Поставь скин — выиграй лучше</p>
         </div>
-        <div className="upg-mult-row">
-          {[1.5, 2, 3, 5, 10].map(m => (
-            <button
-              key={m}
-              className={`upg-mult-btn ${multiplier === m ? 'active' : ''}`}
-              onClick={() => { setMultiplier(m); setToSkin(null); setPhase('idle'); setResult(null); }}
-              disabled={phase === 'spinning'}
-            >
-              <span className="mult-x">×{m}</span>
-              <span className="mult-sub">{m < 2 ? 'safe' : m < 5 ? 'risk' : 'yolo'}</span>
-            </button>
-          ))}
+        <div className="upg2-header-controls">
+          <div className="upg2-mode-tabs">
+            {SPIN_MODES.map(m => (
+              <button
+                key={m.id}
+                className={`upg2-mode-tab ${spinMode === m.id ? 'active' : ''}`}
+                onClick={() => setSpinMode(m.id as 'normal' | 'gamble')}
+                disabled={phase === 'spinning'}
+              >
+                <span className="upg2-mode-tab__icon">{m.icon}</span>
+                <span className="upg2-mode-tab__label">{m.label}</span>
+                <span className="upg2-mode-tab__desc">{m.desc}</span>
+              </button>
+            ))}
+          </div>
+          <div className="upg2-mult-pills">
+            {[1.5, 2, 3, 5, 10].map(m => (
+              <button
+                key={m}
+                className={`upg2-mult-pill ${multiplier === m ? 'active' : ''}`}
+                onClick={() => { setMultiplier(m); setToSkin(null); }}
+                disabled={phase === 'spinning'}
+              >×{m}</button>
+            ))}
+          </div>
         </div>
       </div>
 
-      {/* Main arena */}
-      <div className="upg-arena">
+      {/* Arena */}
+      <div className="upg2-arena">
 
-        {/* FROM skin */}
-        <div className="upg-side upg-side--from">
-          <div className="upg-side__label">
-            <span className="upg-side__dot" style={{ background: '#4b69ff' }} />
+        {/* FROM slot */}
+        <div className="upg2-slot">
+          <div className="upg2-slot__label">
+            <div className="upg2-slot__dot" style={{ background: '#4b69ff' }} />
             Ваш скин
           </div>
-
-          {!showReel ? (
-            fromSkin ? (
-              <div className="upg-skin-display" style={{ '--rc': RARITY_COLORS[fromSkin.rarity] } as React.CSSProperties}>
-                <div className="upg-skin-card">
-                  <div className="upg-skin-card__shine" />
-                  <div className="upg-skin-card__rarity-line" />
-                  <span className="upg-skin-card__emoji">{getWeaponEmoji(fromSkin.weapon)}</span>
-                  <div className="upg-skin-card__info">
-                    <div className="upg-skin-card__weapon">{fromSkin.weapon}</div>
-                    <div className="upg-skin-card__finish">{fromSkin.finish}</div>
-                    <div className="upg-skin-card__price" style={{ color: RARITY_COLORS[fromSkin.rarity] }}>
-                      {fromSkin.price.toLocaleString('ru-RU')} ₽
-                    </div>
-                  </div>
-                  <button className="upg-skin-remove" onClick={() => { setFromSkin(null); setResult(null); }}>
-                    <Icon name="X" size={14} />
-                  </button>
+          {fromSkin ? (
+            <div className="upg2-skin-card" style={{ '--rc': RARITY_COLORS[fromSkin.rarity] } as React.CSSProperties}>
+              <div className="upg2-skin-card__bar" />
+              <div className="upg2-skin-card__shine" />
+              <span className="upg2-skin-card__emoji">{getWeaponEmoji(fromSkin.weapon)}</span>
+              <div className="upg2-skin-card__info">
+                <div className="upg2-skin-card__weapon">{fromSkin.weapon}</div>
+                <div className="upg2-skin-card__finish">{fromSkin.finish}</div>
+                <div className="upg2-skin-card__price" style={{ color: RARITY_COLORS[fromSkin.rarity] }}>
+                  {fromSkin.price.toLocaleString('ru-RU')} ₽
                 </div>
               </div>
-            ) : (
-              <div className="upg-skin-empty">
-                <div className="upg-empty-icon">📦</div>
-                <p>Выбери скин</p>
-              </div>
-            )
+              <button className="upg2-skin-remove" onClick={() => { setFromSkin(null); setResult(null); setPhase('idle'); }}>
+                <Icon name="X" size={13} />
+              </button>
+            </div>
           ) : (
-            <div className="upg-reel-stage upg-reel-stage--from">
-              <div className="upg-reel-mask" />
-              <div className="upg-reel-wrapper">
-                <ReelStrip
-                  items={fromReel}
-                  running={phase === 'spinning'}
-                  won={result === 'win' ? true : result === 'lose' ? false : null}
-                  onStop={() => setStopped(p => p + 1)}
-                />
-              </div>
-              <div className="upg-reel-center-line" />
+            <div className="upg2-slot__empty">
+              <span className="upg2-slot__empty-icon">📦</span>
+              <p>Выбери скин ниже</p>
             </div>
           )}
         </div>
 
-        {/* Center */}
-        <div className="upg-center-panel">
-          {/* Chance arc */}
-          <div className="upg-chance-ring">
-            <svg viewBox="0 0 120 120" className="upg-chance-svg">
-              <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="10" />
-              <circle
-                cx="60" cy="60" r="52"
-                fill="none"
-                stroke={winChance > 60 ? '#4caf50' : winChance > 30 ? '#f0a500' : '#eb4b4b'}
-                strokeWidth="10"
-                strokeLinecap="round"
-                strokeDasharray={`${(winChance / 100) * 326.7} 326.7`}
-                strokeDashoffset="81.7"
-                style={{ transition: 'all 0.6s ease', filter: `drop-shadow(0 0 8px ${winChance > 60 ? '#4caf50' : winChance > 30 ? '#f0a500' : '#eb4b4b'})` }}
-              />
+        {/* WHEEL */}
+        <div className="upg2-wheel-wrap">
+          {/* Color picker */}
+          <div className="upg2-color-picker">
+            <span className="upg2-color-label">Цвет стрелки</span>
+            <div className="upg2-color-dots">
+              {ARROW_COLORS.map(c => (
+                <button
+                  key={c.id}
+                  className={`upg2-color-dot ${arrowColor === c.hex ? 'active' : ''}`}
+                  style={{ background: c.hex, boxShadow: arrowColor === c.hex ? `0 0 12px ${c.hex}` : 'none' }}
+                  title={c.label}
+                  onClick={() => setArrowColor(c.hex)}
+                />
+              ))}
+            </div>
+          </div>
+
+          {/* Wheel container */}
+          <div className="upg2-wheel-outer">
+            {/* Rotating disc */}
+            <svg
+              className="upg2-wheel-disc"
+              viewBox="0 0 260 260"
+              style={{ transform: `rotate(${displayAngle}deg)` }}
+            >
+              <defs>
+                <radialGradient id="hubGrad" cx="50%" cy="50%" r="50%">
+                  <stop offset="0%" stopColor="#2a3550" />
+                  <stop offset="100%" stopColor="#0f1117" />
+                </radialGradient>
+                <filter id="glow">
+                  <feGaussianBlur stdDeviation="3" result="blur" />
+                  <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+                </filter>
+              </defs>
+
+              {/* BG */}
+              <circle cx="130" cy="130" r="128" fill="#0f1117" />
+
+              {/* WIN sector */}
+              <path d={arcPath(130, 130, 118, 0, winSectorDeg)} fill="rgba(34,197,94,0.2)" />
+              {/* LOSE sector */}
+              {winSectorDeg < 360 && (
+                <path d={arcPath(130, 130, 118, winSectorDeg, 360)} fill="rgba(239,68,68,0.16)" />
+              )}
+
+              {/* Outer ring */}
+              <circle cx="130" cy="130" r="118" fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="1.5" />
+
+              {/* Separator line */}
+              {winSectorDeg > 0 && winSectorDeg < 360 && (() => {
+                const p = polarToXY(130, 130, 118, winSectorDeg);
+                return <line x1="130" y1="130" x2={p.x} y2={p.y} stroke="rgba(255,255,255,0.2)" strokeWidth="1" />;
+              })()}
+
+              {/* Tick marks */}
+              {Array.from({ length: 60 }).map((_, i) => {
+                const deg  = i * 6;
+                const big  = i % 5 === 0;
+                const inner = big ? 104 : 110;
+                const s = polarToXY(130, 130, inner, deg);
+                const e = polarToXY(130, 130, 118, deg);
+                return <line key={i} x1={s.x} y1={s.y} x2={e.x} y2={e.y}
+                  stroke="rgba(255,255,255,0.12)" strokeWidth={big ? 1.5 : 0.7} />;
+              })}
+
+              {/* WIN text */}
+              {winChance > 10 && (() => {
+                const p = polarToXY(130, 130, 78, winSectorDeg / 2);
+                return <>
+                  <circle cx={p.x} cy={p.y} r="18" fill="rgba(34,197,94,0.18)" />
+                  <text x={p.x} y={p.y} textAnchor="middle" dominantBaseline="middle"
+                    fill="#4ade80" fontSize="10" fontWeight="800" fontFamily="Rajdhani,sans-serif" letterSpacing="1">WIN</text>
+                </>;
+              })()}
+
+              {/* LOSE text */}
+              {winChance < 90 && (() => {
+                const mid = winSectorDeg + (360 - winSectorDeg) / 2;
+                const p = polarToXY(130, 130, 78, mid);
+                return <>
+                  <circle cx={p.x} cy={p.y} r="18" fill="rgba(239,68,68,0.18)" />
+                  <text x={p.x} y={p.y} textAnchor="middle" dominantBaseline="middle"
+                    fill="#f87171" fontSize="10" fontWeight="800" fontFamily="Rajdhani,sans-serif" letterSpacing="1">LOSE</text>
+                </>;
+              })()}
+
+              {/* Hub */}
+              <circle cx="130" cy="130" r="24" fill="url(#hubGrad)" stroke="rgba(255,255,255,0.1)" strokeWidth="2" />
+              <circle cx="130" cy="130" r="6" fill="rgba(255,255,255,0.2)" />
             </svg>
-            <div className="upg-chance-inner">
-              {phase === 'result' ? (
-                <div className={`upg-result-badge ${result}`}>
-                  {result === 'win' ? '🏆' : '💀'}
-                  <span>{result === 'win' ? 'WIN' : 'LOSE'}</span>
+
+            {/* Fixed arrow overlay */}
+            <svg className="upg2-arrow-svg" viewBox="0 0 260 260">
+              <defs>
+                <filter id="arrowGlow">
+                  <feGaussianBlur stdDeviation="4" result="b" />
+                  <feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
+                </filter>
+              </defs>
+              {/* Arrow pointing UP (12 o'clock) */}
+              <g filter="url(#arrowGlow)">
+                <polygon points="130,4 141,34 119,34" fill={arrowColor} />
+                <rect x="127" y="34" width="6" height="74" rx="3" fill={arrowColor} />
+              </g>
+            </svg>
+
+            {/* Center label */}
+            <div className="upg2-wheel-center">
+              {phase === 'idle' && (
+                <div className="upg2-center-idle">
+                  <span className="upg2-center-pct">{winChance > 0 ? `${winChance}%` : '—'}</span>
+                  {winChance > 0 && <span className="upg2-center-sub">шанс</span>}
                 </div>
-              ) : (
-                <>
-                  <span className="upg-chance-num">{winChance > 0 ? winChance : '—'}%</span>
-                  <span className="upg-chance-label">шанс</span>
-                </>
+              )}
+              {phase === 'spinning' && (
+                <div className="upg2-center-spin" style={{ color: arrowColor }}>⟳</div>
+              )}
+              {phase === 'result' && (
+                <div className={`upg2-center-result ${result}`}>
+                  {result === 'win' ? '✓' : '✗'}
+                </div>
               )}
             </div>
           </div>
 
-          {/* VS */}
-          <div className="upg-vs">VS</div>
-
-          {/* Arrow price */}
-          {fromSkin && toSkin && (
-            <div className="upg-price-flow">
-              <span className="upg-price-from">{fromSkin.price.toLocaleString('ru-RU')} ₽</span>
-              <div className="upg-price-arrow">
-                <div className="upg-price-arrow__line" />
-                <div className="upg-price-arrow__mult">×{multiplier}</div>
-              </div>
-              <span className="upg-price-to">{toSkin.price.toLocaleString('ru-RU')} ₽</span>
-            </div>
-          )}
-
+          {/* Go button */}
           <button
-            className={`upg-go-btn ${phase !== 'idle' || !fromSkin || !toSkin ? 'disabled' : ''}`}
+            className={`upg2-go-btn ${phase !== 'idle' || !fromSkin || !toSkin ? 'disabled' : ''}`}
+            style={fromSkin && toSkin && phase === 'idle' ? {
+              background: `linear-gradient(135deg, ${arrowColor}cc, ${arrowColor}88)`,
+              boxShadow: `0 6px 28px ${arrowColor}55`,
+              color: '#000',
+            } : {}}
             onClick={runUpgrade}
             disabled={phase !== 'idle' || !fromSkin || !toSkin}
           >
-            {phase === 'spinning' ? (
-              <><span className="upg-go-spin">⟳</span> Крутится...</>
-            ) : phase === 'result' ? (
-              result === 'win' ? '🎉 Вы выиграли!' : '💀 Потеряно'
-            ) : (
-              <><Icon name="Zap" size={18} /> Апгрейд</>
-            )}
+            {phase === 'spinning' ? '⏳ Вращается...'
+              : phase === 'result' ? (result === 'win' ? '🏆 Победа!' : '💀 Проигрыш')
+              : <><Icon name="Zap" size={18} /> Апгрейд!</>}
           </button>
 
-          {phase === 'result' && (
-            <button className="upg-reset-btn" onClick={reset}>
+          {phase === 'result' && result === 'win' && (
+            <button className="upg2-reset-btn" onClick={reset}>
               <Icon name="RotateCcw" size={14} /> Новый апгрейд
             </button>
           )}
+
+          {fromSkin && toSkin && (
+            <div className="upg2-price-row">
+              <span className="upg2-price-from">{fromSkin.price.toLocaleString('ru-RU')} ₽</span>
+              <span className="upg2-price-arrow" style={{ color: arrowColor }}>→ ×{multiplier} →</span>
+              <span className="upg2-price-to">{toSkin.price.toLocaleString('ru-RU')} ₽</span>
+            </div>
+          )}
         </div>
 
-        {/* TO skin */}
-        <div className="upg-side upg-side--to">
-          <div className="upg-side__label">
-            <span className="upg-side__dot" style={{ background: '#f0a500' }} />
+        {/* TO slot */}
+        <div className="upg2-slot">
+          <div className="upg2-slot__label">
+            <div className="upg2-slot__dot" style={{ background: arrowColor }} />
             Цель · ~{targetPrice > 0 ? targetPrice.toLocaleString('ru-RU') + ' ₽' : '???'}
           </div>
-
-          {!showReel ? (
-            toSkin ? (
-              <div className="upg-skin-display" style={{ '--rc': RARITY_COLORS[toSkin.rarity] } as React.CSSProperties}>
-                <div className="upg-skin-card upg-skin-card--target">
-                  <div className="upg-skin-card__shine" />
-                  <div className="upg-skin-card__rarity-line" />
-                  <span className="upg-skin-card__emoji">{getWeaponEmoji(toSkin.weapon)}</span>
-                  <div className="upg-skin-card__info">
-                    <div className="upg-skin-card__weapon">{toSkin.weapon}</div>
-                    <div className="upg-skin-card__finish">{toSkin.finish}</div>
-                    <div className="upg-skin-card__price" style={{ color: RARITY_COLORS[toSkin.rarity] }}>
-                      {toSkin.price.toLocaleString('ru-RU')} ₽
-                    </div>
-                  </div>
-                  <button className="upg-skin-remove" onClick={() => { setToSkin(null); setResult(null); }}>
-                    <Icon name="X" size={14} />
-                  </button>
+          {toSkin ? (
+            <div className="upg2-skin-card upg2-skin-card--target" style={{ '--rc': RARITY_COLORS[toSkin.rarity] } as React.CSSProperties}>
+              <div className="upg2-skin-card__bar" />
+              <div className="upg2-skin-card__shine" />
+              <span className="upg2-skin-card__emoji">{getWeaponEmoji(toSkin.weapon)}</span>
+              <div className="upg2-skin-card__info">
+                <div className="upg2-skin-card__weapon">{toSkin.weapon}</div>
+                <div className="upg2-skin-card__finish">{toSkin.finish}</div>
+                <div className="upg2-skin-card__price" style={{ color: RARITY_COLORS[toSkin.rarity] }}>
+                  {toSkin.price.toLocaleString('ru-RU')} ₽
                 </div>
               </div>
-            ) : fromSkin ? (
-              <div className="upg-targets-scroll">
-                {possibleTargets.length > 0 ? possibleTargets.map(s => (
-                  <button
-                    key={s.id}
-                    className="upg-target-card"
-                    style={{ '--rc': RARITY_COLORS[s.rarity] } as React.CSSProperties}
-                    onClick={() => setToSkin(s)}
-                  >
-                    <div className="upg-target-card__bar" />
-                    <span className="upg-target-card__emoji">{getWeaponEmoji(s.weapon)}</span>
-                    <div className="upg-target-card__info">
-                      <span className="upg-target-card__name">{s.weapon} | {s.finish}</span>
-                      <span className="upg-target-card__price">{s.price.toLocaleString('ru-RU')} ₽</span>
-                    </div>
-                    <Icon name="ChevronRight" size={16} className="upg-target-card__arrow" />
-                  </button>
-                )) : (
-                  <div className="upg-skin-empty">
-                    <div className="upg-empty-icon">🔍</div>
-                    <p>Нет предметов для ×{multiplier}.<br />Попробуй другой множитель.</p>
+              <button className="upg2-skin-remove" onClick={() => { setToSkin(null); setResult(null); setPhase('idle'); }}>
+                <Icon name="X" size={13} />
+              </button>
+            </div>
+          ) : fromSkin ? (
+            <div className="upg2-targets">
+              {possibleTargets.length > 0 ? possibleTargets.map(s => (
+                <button key={s.id} className="upg2-target-row"
+                  style={{ '--rc': RARITY_COLORS[s.rarity] } as React.CSSProperties}
+                  onClick={() => setToSkin(s)}>
+                  <div className="upg2-target-row__bar" />
+                  <span className="upg2-target-row__emoji">{getWeaponEmoji(s.weapon)}</span>
+                  <div className="upg2-target-row__info">
+                    <span className="upg2-target-row__name">{s.weapon} | {s.finish}</span>
+                    <span className="upg2-target-row__price">{s.price.toLocaleString('ru-RU')} ₽</span>
                   </div>
-                )}
-              </div>
-            ) : (
-              <div className="upg-skin-empty">
-                <div className="upg-empty-icon">🎯</div>
-                <p>Сначала выбери исходный скин</p>
-              </div>
-            )
+                  <Icon name="ChevronRight" size={15} />
+                </button>
+              )) : (
+                <div className="upg2-slot__empty">
+                  <span>🔍</span><p>Нет предметов для ×{multiplier}</p>
+                </div>
+              )}
+            </div>
           ) : (
-            <div className="upg-reel-stage upg-reel-stage--to">
-              <div className="upg-reel-mask" />
-              <div className="upg-reel-wrapper">
-                <ReelStrip
-                  items={toReel}
-                  running={phase === 'spinning'}
-                  won={result === 'win' ? true : result === 'lose' ? false : null}
-                  onStop={() => setStopped(p => p + 1)}
-                />
-              </div>
-              <div className="upg-reel-center-line" />
+            <div className="upg2-slot__empty">
+              <span className="upg2-slot__empty-icon">🎯</span>
+              <p>Сначала выбери скин слева</p>
             </div>
           )}
         </div>
       </div>
 
-      {/* Inventory picker */}
-      {!fromSkin && phase === 'idle' && (
-        <div className="upg-inv-section">
-          <div className="upg-inv-title">
-            <Icon name="Archive" size={16} />
-            Инвентарь · выбери скин для апгрейда
+      {/* Inventory strip */}
+      {phase === 'idle' && !fromSkin && (
+        <div className="upg2-inv-section">
+          <div className="upg2-inv-title">
+            <Icon name="Archive" size={15} />
+            Инвентарь — выбери скин для апгрейда
           </div>
-          <div className="upg-inv-strip">
+          <div className="upg2-inv-strip">
             {inventory.length > 0 ? inventory.map(s => (
-              <button
-                key={s.id}
-                className="upg-inv-card"
+              <button key={s.id} className="upg2-inv-card"
                 style={{ '--rc': RARITY_COLORS[s.rarity] } as React.CSSProperties}
-                onClick={() => { setFromSkin(s); setResult(null); }}
-              >
-                <div className="upg-inv-card__top">
-                  <div className="upg-inv-card__bar" />
-                  <span className="upg-inv-card__emoji">{getWeaponEmoji(s.weapon)}</span>
-                  {s.wear && <span className="upg-inv-card__wear">{s.wear}</span>}
-                </div>
-                <div className="upg-inv-card__info">
-                  <div className="upg-inv-card__name">{s.finish}</div>
-                  <div className="upg-inv-card__price">{s.price.toLocaleString('ru-RU')} ₽</div>
-                </div>
+                onClick={() => setFromSkin(s)}>
+                <div className="upg2-inv-card__bar" />
+                <span className="upg2-inv-card__emoji">{getWeaponEmoji(s.weapon)}</span>
+                {s.wear && <span className="upg2-inv-card__wear">{s.wear}</span>}
+                <div className="upg2-inv-card__name">{s.finish}</div>
+                <div className="upg2-inv-card__price">{s.price.toLocaleString('ru-RU')} ₽</div>
               </button>
             )) : (
-              <div className="upg-inv-empty">
-                <Icon name="Package" size={20} />
+              <div className="upg2-inv-empty">
+                <Icon name="Package" size={18} />
                 <span>Инвентарь пуст. Сначала открой кейс.</span>
               </div>
             )}
